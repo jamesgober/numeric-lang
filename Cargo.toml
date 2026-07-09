@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "numeric-lang"
-version = "0.1.0"
+version = "1.0.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -19,10 +19,10 @@ readme = "README.md"
 description = "Numeric literal parsing: radixes, separators, float round-trip."
 
 # Keywords (5 max)
-keywords = [language,parsing,numeric,float]
+keywords = ["language", "parsing", "numeric", "float"]
 
 # Categories
-categories = [development-tools,parsing]
+categories = ["development-tools", "parsing"]
 
 # Links
 homepage      = "https://github.com/jamesgober/numeric-lang"
