@@ -134,6 +134,14 @@ Rules that hold across every form:
   are an overflow error. Floats are IEEE-754 `f64`, parsed with correct
   rounding (the fraction/exponent grammar matches the standard library's
   `f64` parser).
+- **Floats follow IEEE-754 rounding at the edges of the range, as the standard
+  library does.** A float too large for `f64` rounds to infinity (`1e400`
+  gives `Float(inf)`), and one too small rounds to zero (`1e-400` gives
+  `Float(0.0)`). Neither is an error, unlike integer overflow. Check
+  `is_finite()` on the result if your language treats an out-of-range float
+  constant as a mistake.
+- **Floats have no length limit.** A literal with separators parses exactly
+  like the same text without them, however long it is.
 
 The parser never panics — every rejected input is a
 [`ParseNumericError`](#parsenumericerror), never a crash.
@@ -313,7 +321,7 @@ new variants may appear in a minor release).
 | `Overflow` | Integer exceeds `u128`. | `"3402823...456"` |
 | `MalformedFloat` | Malformed decimal float. | `"1e"`, `"1.2.3"` |
 | `RadixFloatUnsupported` | Float syntax under a radix prefix. | `"0x1.5"` |
-| `FloatTooLong` | A separated float exceeds the length cap after cleaning. | 512+ cleaned bytes |
+| `FloatTooLong` | No longer returned since 1.0.1: separated floats of any length parse. Kept so existing `match` arms still compile. | (none) |
 | `UnexpectedChar { index }` | Unexpected leading character (e.g. a sign). | `"-5"`, `"+1"` |
 
 **Examples**
@@ -361,10 +369,14 @@ range.
 conversion is a solved, subtle problem, and the standard library already does
 it well. `numeric-lang` validates separator placement and hands the cleaned
 digits to the `f64` parser. When a float carries no `_`, it is parsed in place
-with zero copies; only the separated case touches a fixed 512-byte stack buffer
-(hence `FloatTooLong`, which no human-written literal approaches). This keeps
-the float path allocation-free and `no_std` while inheriting the standard
-library's round-trip correctness.
+with zero copies. A separated float is copied without its separators into a
+fixed 832-byte stack buffer. One too long for it is rewritten as
+`0.<digits>e<exponent>`, keeping its first 800 significant digits plus one
+digit that records whether anything nonzero followed. Every `f64` and every
+rounding boundary between two of them has at most 767 significant digits, so
+the rewritten form rounds to the same value. This keeps the float path
+allocation-free and `no_std` while inheriting the standard library's
+round-trip correctness.
 
 **Sign is deliberately excluded.** A literal is a magnitude. Keeping sign out
 of the grammar means `parse` composes cleanly with a lexer that treats unary

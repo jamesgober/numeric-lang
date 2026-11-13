@@ -5,15 +5,29 @@ use crate::error::ParseNumericError;
 use crate::number::Number;
 use crate::radix::Radix;
 
-/// Maximum length, in bytes, of a floating-point literal *after* its `_`
-/// separators are removed. Literals without separators are parsed in place and
-/// are not subject to this limit.
+/// Size, in bytes, of the stack buffer a separated float is copied into once
+/// its `_` separators are removed. Literals without separators are parsed in
+/// place and never touch it.
 ///
-/// The bound only exists so the separator-stripping path can use a fixed
-/// stack buffer and stay allocation-free (and `no_std`). It is far larger than
-/// any human-written float: an `f64` is fully determined by ~17 significant
-/// digits, and even pathological exact-decimal forms sit well under this.
-const MAX_FLOAT_LITERAL_LEN: usize = 512;
+/// A cleaned literal that fits is copied verbatim. A longer one is rewritten
+/// into the buffer in a shorter form with the same value (see
+/// [`parse_long_float`]), so there is no length limit and the path stays
+/// allocation-free and `no_std`.
+const FLOAT_BUF_LEN: usize = 832;
+
+/// Significant digits kept when a long separated float is rewritten.
+///
+/// Every `f64`, and every point exactly halfway between two adjacent `f64`
+/// values, has at most 767 significant decimal digits. Keeping more than that,
+/// plus one nonzero "sticky" digit standing for any nonzero digits dropped
+/// after them, keeps the literal on the same side of every such point, so
+/// correct rounding gives the same result as for the full literal.
+const KEPT_DIGITS: usize = 800;
+
+/// The largest decimal exponent the rewritten form carries. Anything beyond it
+/// is already far outside the `f64` range (including subnormals) for a
+/// mantissa of [`KEPT_DIGITS`] digits, so it rounds the same way.
+const MAX_REWRITTEN_EXPONENT: i64 = 1_000_000;
 
 /// Parse a numeric literal into a [`Number`].
 ///
@@ -32,8 +46,13 @@ const MAX_FLOAT_LITERAL_LEN: usize = 512;
 /// Returns [`ParseNumericError`] describing the first problem encountered:
 /// empty input, an invalid digit, a misplaced separator, missing digits, an
 /// integer that overflows [`u128`], a malformed float, float syntax under a
-/// radix prefix, an over-long separated float, or an unexpected leading
-/// character. This function never panics on any input.
+/// radix prefix, or an unexpected leading character. This function never
+/// panics on any input.
+///
+/// A float outside the `f64` range is not an error: like the standard
+/// library's parser, it rounds to infinity when too large (`1e400`) and to
+/// zero when too small (`1e-400`). Check [`f64::is_finite`] on the result if an
+/// out-of-range float constant should be rejected.
 ///
 /// # Examples
 ///
@@ -167,9 +186,8 @@ fn parse_float(input: &str) -> Result<f64, ParseNumericError> {
             .map_err(|_| ParseNumericError::MalformedFloat);
     }
 
-    let mut buf = [0u8; MAX_FLOAT_LITERAL_LEN];
-    let mut len = 0usize;
-
+    // Validate every separator and measure the cleaned length.
+    let mut cleaned_len = 0usize;
     for (i, &b) in bytes.iter().enumerate() {
         if b == b'_' {
             let ok = i > 0
@@ -179,14 +197,22 @@ fn parse_float(input: &str) -> Result<f64, ParseNumericError> {
             if !ok {
                 return Err(ParseNumericError::MisplacedSeparator { index: i });
             }
-            continue;
+        } else {
+            cleaned_len += 1;
         }
-        if len == MAX_FLOAT_LITERAL_LEN {
-            return Err(ParseNumericError::FloatTooLong);
-        }
-        buf[len] = b;
-        len += 1;
     }
+
+    let mut buf = [0u8; FLOAT_BUF_LEN];
+    let len = if cleaned_len <= FLOAT_BUF_LEN {
+        let mut len = 0usize;
+        for &b in bytes.iter().filter(|&&b| b != b'_') {
+            buf[len] = b;
+            len += 1;
+        }
+        len
+    } else {
+        parse_long_float(bytes, &mut buf)?
+    };
 
     let cleaned =
         core::str::from_utf8(&buf[..len]).map_err(|_| ParseNumericError::MalformedFloat)?;
@@ -195,8 +221,139 @@ fn parse_float(input: &str) -> Result<f64, ParseNumericError> {
         .map_err(|_| ParseNumericError::MalformedFloat)
 }
 
+/// Rewrite a separated float that is too long for the buffer as
+/// `0.<digits>e<exponent>`, with the same value up to correct rounding, and
+/// return the length written.
+///
+/// `bytes` has already had its separators validated; they are skipped here.
+/// The grammar checked is the standard library's for a finite float:
+/// `Digit* ['.' Digit*] [('e' | 'E') ['+' | '-'] Digit+]`, with at least one
+/// mantissa digit. Leading zeros are dropped, the first [`KEPT_DIGITS`]
+/// significant digits are kept, and any nonzero digit after them is folded
+/// into one trailing `1`.
+fn parse_long_float(
+    bytes: &[u8],
+    buf: &mut [u8; FLOAT_BUF_LEN],
+) -> Result<usize, ParseNumericError> {
+    const MALFORMED: ParseNumericError = ParseNumericError::MalformedFloat;
+
+    // Digits start after "0.".
+    let mut kept = 0usize;
+    let mut sticky = false;
+    let mut started = false;
+    let mut mantissa_digits = 0usize;
+    // The value is 0.<kept digits> * 10^decimal_exponent.
+    let mut decimal_exponent: i64 = 0;
+    let mut in_fraction = false;
+
+    let mut iter = bytes.iter().copied().filter(|&b| b != b'_');
+    let mut exponent_marker = false;
+
+    for b in iter.by_ref() {
+        match b {
+            b'0'..=b'9' => {
+                mantissa_digits += 1;
+                if !started && b == b'0' {
+                    // A leading zero only shifts the point when it follows it.
+                    if in_fraction {
+                        decimal_exponent = decimal_exponent.saturating_sub(1);
+                    }
+                    continue;
+                }
+                started = true;
+                if !in_fraction {
+                    decimal_exponent = decimal_exponent.saturating_add(1);
+                }
+                if kept < KEPT_DIGITS {
+                    buf[2 + kept] = b;
+                    kept += 1;
+                } else if b != b'0' {
+                    sticky = true;
+                }
+            }
+            b'.' if !in_fraction => in_fraction = true,
+            b'e' | b'E' => {
+                exponent_marker = true;
+                break;
+            }
+            _ => return Err(MALFORMED),
+        }
+    }
+    if mantissa_digits == 0 {
+        return Err(MALFORMED);
+    }
+
+    let mut exponent: i64 = 0;
+    if exponent_marker {
+        let mut negative = false;
+        let mut exponent_digits = 0usize;
+        for (i, b) in iter.enumerate() {
+            match b {
+                b'+' | b'-' if i == 0 => negative = b == b'-',
+                b'0'..=b'9' => {
+                    exponent_digits += 1;
+                    exponent = exponent
+                        .saturating_mul(10)
+                        .saturating_add(i64::from(b - b'0'));
+                }
+                _ => return Err(MALFORMED),
+            }
+        }
+        if exponent_digits == 0 {
+            return Err(MALFORMED);
+        }
+        if negative {
+            exponent = -exponent;
+        }
+    }
+
+    if !started {
+        // Every mantissa digit was zero: the value is zero whatever the exponent.
+        buf[0] = b'0';
+        return Ok(1);
+    }
+
+    buf[0] = b'0';
+    buf[1] = b'.';
+    let mut len = 2 + kept;
+    if sticky {
+        buf[len] = b'1';
+        len += 1;
+    }
+    buf[len] = b'e';
+    len += 1;
+
+    let total = decimal_exponent
+        .saturating_add(exponent)
+        .clamp(-MAX_REWRITTEN_EXPONENT, MAX_REWRITTEN_EXPONENT);
+    if total < 0 {
+        buf[len] = b'-';
+        len += 1;
+    }
+    let mut magnitude = total.unsigned_abs();
+    let mut digits = [0u8; 20];
+    let mut count = 0usize;
+    loop {
+        digits[count] = b'0' + (magnitude % 10) as u8;
+        count += 1;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    for &d in digits[..count].iter().rev() {
+        buf[len] = d;
+        len += 1;
+    }
+    Ok(len)
+}
+
 #[cfg(test)]
 mod tests {
+    // The tests build strings; without `std` they come from `alloc`.
+    extern crate alloc;
+    use alloc::string::{String, ToString};
+
     use super::*;
 
     #[test]
@@ -384,12 +541,15 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_over_long_separated_float_returns_err() {
-        // A separated float over 512 bytes after cleaning trips the cap.
+    fn test_parse_long_separated_float_matches_plain_form() {
+        // A separated float of any length parses like the same text without
+        // its separators.
         let mut s = String::from("1_");
         s.push_str(&"0".repeat(600));
         s.push_str(".0");
-        assert_eq!(parse(&s), Err(ParseNumericError::FloatTooLong));
+        let plain = s.replace('_', "");
+        assert_eq!(parse(&s), parse(&plain));
+        assert_eq!(parse(&s), Ok(Number::Float(f64::INFINITY)));
     }
 
     #[test]
