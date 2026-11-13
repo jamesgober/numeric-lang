@@ -18,7 +18,7 @@
 
 <div align="left">
     <p>
-        numeric-lang is the FEAT-tier crate: correct numeric literal parsing — radixes, digit separators, and exact float round-trip. Part of the -lang language-construction family; see _strategy/LANG_COLLECTION.md for the master plan.
+        numeric-lang is the FEAT-tier crate: correct numeric literal parsing — radixes, digit separators, and exact float round-trip. Part of the -lang language-construction family.
     </p>
     <br>
     <hr>
