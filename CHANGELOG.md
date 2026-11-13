@@ -11,13 +11,25 @@
 
 ## [Unreleased]
 
-### Added
+---
 
-### Changed
+## [1.0.1] - 2026-11-12
 
 ### Fixed
 
-### Security
+- A float with `_` separators longer than 512 bytes after removing them was
+  refused with `FloatTooLong`, while the same digits without separators parsed.
+  Separated floats now parse at any length, with the same correctly rounded
+  result as the text without separators, and still without allocating.
+  `FloatTooLong` is no longer returned.
+- A long separated float with bad syntax now reports `MalformedFloat`, as the
+  same text without separators does.
+
+### Changed
+
+- Documented that a float outside the `f64` range rounds to infinity or zero,
+  as the standard library's parser does, rather than failing like an integer
+  that overflows `u128`.
 
 ---
 
@@ -94,7 +106,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/numeric-lang/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/jamesgober/numeric-lang/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/jamesgober/numeric-lang/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/jamesgober/numeric-lang/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/jamesgober/numeric-lang/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/numeric-lang/releases/tag/v0.1.0

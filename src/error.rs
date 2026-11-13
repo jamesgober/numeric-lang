@@ -50,10 +50,11 @@ pub enum ParseNumericError {
     /// (a `.`), which this crate does not support. Only decimal floats exist.
     RadixFloatUnsupported,
 
-    /// A floating-point literal containing `_` separators exceeded the
-    /// maximum supported length after the separators were removed. See the
-    /// crate docs for the exact limit. Literals without separators are not
-    /// length-limited.
+    /// A floating-point literal containing `_` separators was too long.
+    ///
+    /// No longer returned since 1.0.1: [`parse`](crate::parse) accepts
+    /// separated floats of any length, as it always did for floats without
+    /// separators. The variant is kept so existing `match` arms still compile.
     FloatTooLong,
 
     /// An unexpected character appeared where a digit or radix prefix was
